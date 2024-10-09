@@ -35,7 +35,7 @@ Changelog:
         Added - $RebootDelay variable and output of delay used
         Added - $RebootWarningMessage variable to inform user of pending reboot
         Fixed - Added decimal places to download function so enablement packages don't show as 0 MB
-		Fixed - Added TLS protocol settings to Get-Download to fix SSL error with some devices
+	Fixed - Added TLS protocol settings to Get-Download to fix SSL error with some devices
         Fixed - Corrected output for 'Already current or newer' condition to use $WinLatestVersion instead of $Win10LatestVersion
   1.2 / 2023-11-19
         Changed - Refactored to use more functions & variables (less redundant code)
