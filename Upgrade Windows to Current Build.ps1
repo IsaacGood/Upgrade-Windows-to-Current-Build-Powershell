@@ -1,4 +1,5 @@
 <# Upgrade Windows 10 & 11 to Current Build
+https://github.com/IsaacGood/Upgrade-Windows-to-Current-Build-Powershell/
 
 This script will attempt to upgrade in various ways depending on the current version installed
 and the options selected below. Assuming all methods are allowed, it will:
