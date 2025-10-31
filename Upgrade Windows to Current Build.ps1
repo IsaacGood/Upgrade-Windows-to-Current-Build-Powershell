@@ -4,9 +4,10 @@ https://github.com/IsaacGood/Upgrade-Windows-to-Current-Build-Powershell/
 This script will attempt to upgrade in various ways depending on the current version installed
 and the options selected below. Assuming all methods are allowed, it will:
     - Exit if already on current build or build is incompatible with all allowed methods.
-    - If the build is compatible with enablement, it applies the enablement CAB file. If that fails, it attempts the Update Assistant method.
-    - If the build is compatible with enablement but the UBR is not, it attempts to install the required cumulative update.
-    - If the build is incompatible with enablement (too old or 24H2) it attempts to upgrade via Update Assistant.
+    - If the build is compatible with enablement, it applies the enablement MSU file. If that fails, it attempts the Update Assistant method.
+    - If the build is compatible with enablement but the UBR is not, it attempts to install the required cumulative update so that enablement can be applied after the next reboot.
+    - If the build is incompatible with enablement it attempts to upgrade via Update Assistant.
+    - If Windows 10 and $UpgradeWindows10 = $true, it uses Update Assistant to upgrade to 11.
 
 Notes:
     - Read all the variables and make sure they're set appropriately for your environment!
@@ -21,12 +22,13 @@ If you have issues upgrading, here are some things to check in order of commonal
     - Verify the device meets the Secure Boot, TPM, and CPU requirements and check the experience
       indicators: https://www.deploymentresearch.com/understanding-upgrade-experience-indicators-for-windows-11-upgrade-readiness/
     - Check for BIOS and driver updates from the hardware vendor.
+    - Western Digital NVMe SSD models SN580 and SN770 need a firmware update, use Sandisk Dashboard to update
     - Check for corrupt/leftover/unneeded user profiles in c:\Users\ and HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList and remove them.
     - Check for Windows Safeguard/Feature Blocks:
         https://github.com/AdamGrossTX/FU.WhyAmIBlocked
         https://garytown.com/windows-safeguard-hold-id-lookup-crowd-sourced
         https://www.asquaredozen.com/2020/07/26/demystifying-windows-10-feature-update-blocks/
-    - Check c:\$Windows.~BT\Sources\Panther\setuperr.log for clues.
+    - Check c:\$Windows.~BT\Sources\Panther\setuperr.log for clues/error codes to look up.
     - In the same folder, open the most recent CompatData_<datestamp>.xml and check for any items with BlockingType="Hard"
     - Run 'chkdsk /f', 'dism /Online /Cleanup-Image /CheckHealth', 'sfc /scannow' (in that order) to try and fix corruption/filesystem issues.
     - On rare occasions, virtual printer drivers have caused issues, you can remove them with the following commands:
@@ -34,16 +36,19 @@ If you have issues upgrading, here are some things to check in order of commonal
         Remove-Printer -Name "Microsoft XPS Document Writer"
     - If there's an error in setuperr.log: "Error encountered while adding provisioned APPX package: The package repository is corrupted."
       you can try running this, rebooting and trying upgrade again: https://github.com/mardahl/PSBucket/blob/master/invoke-StateRepositoryReset.ps1
+    - If the setup fails before rebooting, try running the Update Assistant interactively. It is important to use right-click and "Run as administrator", bizarrely it has worked when script has not.
+    - If you get "You can't install Windows on a USB flash drive using Setup" Error:  Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control' -Name 'PortableOperatingSystem' -Value 0
 
 Future development ideas:
     - Write attempted method to file/reg and then progressively try next method/alert if failed on next script run
     - Integrate ISO upgrade script as another fallback method
-    - Integrate DISM upgrade method?
-        DISM /Online /Cleanup-Image /RestoreHealth
-        DISM /Get-WimInfo /WimFile:<DriveLetter>:\sources\install.wim
-        DISM /Online /Apply-Image /ImageFile:<DriveLetter>:\sources\install.esd /Index:1 /ApplyDir:c:\
 
 Changelog:
+  2.1 / 2025-10-30
+        Added - 25H2 enablement packages, required cumulative updates and build numbers (now does CU for ARM64 also)
+        Added - More troubleshooting notes
+        Added - Clarification that WUA always installs latest version, $Win11LatestVersion is ONLY for determining if update is needed
+        Fixed - Restored missing code for determining RMM environment
   2.0 / 2025-08-16 - Initial release of Windows 11 only version
         Added - Check for client OS name so upgrade is not attempted on servers
         Added - Variable for setting number of days for upgrade uninstall window
@@ -79,9 +84,6 @@ $AttemptUpdateAssistant = $true
 $IgnoreRegistryBlocks = $false # Allows script to run, but leaves registry settings in place
 $RemoveRegistryBlocks = $false # Removes registry settings so future upgrades aren't blocked
 
-# Location to download files
-$TargetFolder = "$env:Temp"
-
 # How long to wait before assuming something went wrong and exiting.
 # Depending on the machine and bandwidth upgrades can take up to several hours.
 $TimeToWaitForCompletion = '180' # in minutes
@@ -89,40 +91,47 @@ $TimeToWaitForCompletion = '180' # in minutes
 # Disable Privacy Settings Experience at first sign-in (optional)
 reg add HKLM\SOFTWARE\Policies\Microsoft\Windows\OOBE /f /v DisablePrivacyExperience /t REG_DWORD /d 1 | Out-Null
 
-# Latest version of Windows currently available (for determining if updates are needed)
-$Win11LatestVersion = "24H2"
+# Latest version of Windows currently available
+# This is ONLY for determining if updates are needed, not for selecting which version to install
+# If invoked by script logic, Update Assistant will always install the latest version available
+# To install a previous version, you need to use the ISO upgrade method (not included in this script, yet)
+$Win11LatestVersion = "25H2"
 
 # Enablement Packages
-$Win11EPURLx64 = 'https://catalog.sf.dl.delivery.mp.microsoft.com/filestreamingservice/files/49a41627-758a-42b7-8786-cc61cc19f1ee/public/windows11.0-kb5027397-x64_955d24b7a533f830940f5163371de45ff349f8d9.cab'
-$Win11EPURLARM64 = 'https://catalog.sf.dl.delivery.mp.microsoft.com/filestreamingservice/files/719ca7b9-26eb-4de4-a45b-04ad2b58c807/public/windows11.0-kb5027397-arm64_1f7d9a4314296e4c35879d5438167ba7b60d895f.cab'
-$Win11EPRequiredBuild = "22621"
-$Win11EPRequiredUBR = "2506"
+$Win11EPURLx64 = 'https://catalog.sf.dl.delivery.mp.microsoft.com/filestreamingservice/files/fa84cc49-18b2-4c26-b389-90c96e6ae0d2/public/windows11.0-kb5054156-x64_a0c1638cbcf4cf33dbe9a5bef69db374b4786974.msu'
+$Win11EPURLARM64 = 'https://catalog.sf.dl.delivery.mp.microsoft.com/filestreamingservice/files/78b265e5-83a8-4e0a-9060-efbe0bac5bde/public/windows11.0-kb5054156-arm64_3d5c91aaeb08a87e0717f263ad4a61186746e465.msu'
+$Win11EPRequiredBuild = "26100"
+$Win11EPRequiredUBR = "5074"
 
 # Cumulative Updates required for Enablement Packages
-$Win11CUKB = 'KB5032190'
-$Win11CUURL = 'https://catalog.sf.dl.delivery.mp.microsoft.com/filestreamingservice/files/cd35ece3-585a-48e9-a9b5-ad5cd3699d32/public/windows11.0-kb5032190-x64_fdbd38c60e7ef2c6adab4bf5b508e751ccfbd525.msu'
-$Win11CURequiredBuild = "22621"
-$Win11CURequiredUBR = "521"
+$Win11CUKB = 'KB5065426'
+$Win11CUURLx64 = 'https://catalog.sf.dl.delivery.mp.microsoft.com/filestreamingservice/files/7342fa97-e584-4465-9b3d-71e771c9db5b/public/windows11.0-kb5065426-x64_32b5f85e0f4f08e5d6eabec6586014a02d3b6224.msu'
+$Win11CUURLARM64 = 'https://catalog.sf.dl.delivery.mp.microsoft.com/filestreamingservice/files/9107423f-d969-4584-b66d-d71bda583ee7/public/windows11.0-kb5065426-arm64_a41360977755965f6afa21f6a39dc0adaeff326a.msu'
+$Win11CURequiredBuild = "26100"
+$Win11CURequiredUBR = "863"
 
 # Update Assistants
 $Win11UAURL = 'https://go.microsoft.com/fwlink/?LinkID=2171764'
 
-# Windows Update Policy registry location
-$WUPolicyRegLocation = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\'
+# Location to download files
+$TargetFolder = "$env:Temp"
 
 ### END OF VARIABLES / START FUNCTIONS ###
 
-if ($null -ne $env:SyncroModule) { Import-Module $env:SyncroModule -DisableNameChecking }
+# Determine if running in Datto RMM or Syncro
+$Datto = Get-Service | Where-Object { $_.DisplayName -match 'Datto RMM' }
+$Syncro = Get-Module | Where-Object { $_.ModuleBase -match 'Syncro' }
+if ($Syncro) { Import-Module $env:SyncroModule -DisableNameChecking }
 
 function Exit-WithError {
     param ($Text)
     if ($Datto) {
-        Write-Information "<-Start Result->Alert=$Text<-End Result->"
+        Write-Output "<-Start Result->Alert=$Text<-End Result->"
     } elseif ($Syncro) {
-        Write-Information $Text
+        Write-Output $Text
         Rmm-Alert -Category "Upgrade Windows" -Body $Text
     } else {
-        Write-Information $Text
+        Write-Output $Text
     }
     Start-Sleep 10 # Give us a chance to view output when running interactively
     exit 1
@@ -283,10 +292,10 @@ switch ($MajorVersion) {
         $WinLatestVersion = $Win11LatestVersion
         $EPRequiredBuild = $Win11EPRequiredBuild; $EPRequiredUBR = $Win11EPRequiredUBR
         $CURequiredBuild = $Win11CURequiredBuild; $CURequiredUBR = $Win11CURequiredUBR
-        $KB = $Win11CUKB; $KBURL = $Win11CUURL; $UAURL = $Win11UAURL; $EPURL = $Win11EPURLx64
+        $KB = $Win11CUKB; $UAURL = $Win11UAURL; $EPURL = $Win11EPURLx64
         if ((Get-CimInstance -ClassName Win32_OperatingSystem).OSArchitecture -like "ARM*") {
-            $EPURL = $Win11EPURLARM64
-        } else { $EPURL = $Win11EPURLx64 }
+            $EPURL = $Win11EPURLARM64; $KBURL = $Win11CUURLARM64
+        } else { $EPURL = $Win11EPURLx64; $KBURL = $Win11CUURLx64;}
     }
 }
 
@@ -305,6 +314,7 @@ if (-not (Test-Path -Path "$TargetFolder" -PathType Container)) {
 reg add "HKLM\SYSTEM\Setup" /f /v UninstallWindow /t REG_DWORD /d $UninstallWindow | Out-Null
 
 # Remove Windows Update ProductVersion/TargetRelease registry settings
+$WUPolicyRegLocation = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\'
 if ($RemoveRegistryBlocks -eq $true -and ((Get-Item $WUPolicyRegLocation -ErrorAction SilentlyContinue).Property -like "TargetReleaseVersion*")) {
     Remove-ItemProperty $WUPolicyRegLocation -Name 'ProductVersion' -ErrorAction SilentlyContinue
     Remove-ItemProperty $WUPolicyRegLocation -Name 'TargetReleaseVersion' -ErrorAction SilentlyContinue
